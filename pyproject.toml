@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.scripts]
-gfgpt = "src.cli:cli"
+gfgpt = "cli:cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

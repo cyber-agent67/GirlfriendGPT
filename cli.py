@@ -1,218 +1,343 @@
 #!/usr/bin/env python3
-"""CLI tool for intimate companion agent - Cursor for Engineering.
+"""CLI for AI Influencer Agent with gateway management."""
 
-This CLI allows engineers to interact with their intimate AI companion
-for code generation, refactoring, and technical guidance.
-"""
-
-import click
-import json
 import asyncio
-import websockets
+import json
+import os
+import signal
+import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
-import sys
+
+import click
+import websockets
+from httpx import get
+
+from src.config import ConfigManager
+
+STATE_DIR = Path.home() / ".gfgpt"
+STATE_FILE = STATE_DIR / "state.json"
 
 
-class CompanionCLI:
-    """CLI client for the companion websocket server."""
-    
-    def __init__(self, server_url: str = "ws://localhost:8000"):
-        self.server_url = server_url
-        self.session_id = self._load_or_create_session()
-    
-    def _load_or_create_session(self) -> str:
-        """Load existing session or create new one."""
-        session_file = Path.home() / ".companion" / "session.json"
-        
-        if session_file.exists():
-            with open(session_file, 'r') as f:
-                data = json.load(f)
-                return data.get("session_id", self._new_session_id())
-        else:
-            session_id = self._new_session_id()
-            session_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(session_file, 'w') as f:
-                json.dump({"session_id": session_id}, f)
-            return session_id
-    
-    @staticmethod
-    def _new_session_id() -> str:
-        """Generate new session ID."""
-        import uuid
-        return str(uuid.uuid4())
-    
-    async def send_message(self, message: str, message_type: str = "text") -> str:
-        """Send message to companion and get response.
-        
-        Args:
-            message: The message to send
-            message_type: Type of message (text, code_request, etc.)
-        
-        Returns:
-            Response from the companion
-        """
-        uri = f"{self.server_url}/ws/{self.session_id}"
-        
-        try:
-            async with websockets.connect(uri) as websocket:
-                # Receive initial greeting
-                greeting = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                print(f"Companion: {json.loads(greeting)['content']}\n")
-                
-                # Send user message
-                msg_data = {
-                    "role": "user",
-                    "content": message,
-                    "type": message_type,
-                    "metadata": None
-                }
-                await websocket.send(json.dumps(msg_data))
-                
-                # Receive and print response
-                response = ""
-                while True:
-                    try:
-                        data = await asyncio.wait_for(websocket.recv(), timeout=30.0)
-                        msg = json.loads(data)
-                        if msg["role"] == "assistant":
-                            print(f"Companion: {msg['content']}\n")
-                            response += msg['content']
-                    except asyncio.TimeoutError:
-                        break
-                    except Exception:
-                        break
-                
-                return response
-        
-        except Exception as e:
-            click.echo(f"Error: Could not connect to companion at {self.server_url}", err=True)
-            click.echo(f"Details: {str(e)}", err=True)
-            sys.exit(1)
+def ensure_state_dir():
+    """Ensure state directory exists."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_state() -> dict:
+    """Load application state."""
+    ensure_state_dir()
+    if STATE_FILE.exists():
+        with open(STATE_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+
+def save_state(state: dict):
+    """Save application state."""
+    ensure_state_dir()
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f, indent=2)
+
+
+def is_process_running(pid: int) -> bool:
+    """Check if a process is running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
 
 
 @click.group()
-@click.option('--server', default='ws://localhost:18789', help='Websocket server URL')
-@click.pass_context
-def cli(ctx, server):
-    """Intimate Companion CLI - Your AI engineering assistant."""
-    ctx.ensure_object(dict)
-    ctx.obj['cli'] = CompanionCLI(server)
+def cli():
+    """AI Influencer Agent - Your personal media creator and social media manager."""
+    pass
 
 
-@cli.command()
-@click.argument('request')
-@click.pass_context
-def code(ctx, request):
-    """Generate code based on a request.
-    
-    Example:
-        companion code "Python function to calculate fibonacci"
-    """
-    cli_obj = ctx.obj['cli']
-    
-    prompt = f"Write code for: {request}"
-    click.echo(f"\nYou: {prompt}\n")
-    
-    asyncio.run(cli_obj.send_message(prompt, message_type="code_request"))
+@cli.group()
+def gateway():
+    """Manage the gateway server."""
+    pass
 
 
-@cli.command()
-@click.argument('filepath', type=click.Path(exists=True))
-@click.argument('request')
-@click.pass_context
-def refactor(ctx, filepath, request):
-    """Refactor existing code.
+@gateway.command()
+@click.option('--port', type=int, help='Gateway port')
+@click.option('--host', help='Gateway host')
+@click.option('--daemon', is_flag=True, help='Run in background')
+def start(port: Optional[int], host: Optional[str], daemon: bool):
+    """Start the gateway server."""
+    config = ConfigManager.load_config()
     
-    Example:
-        companion refactor myfile.py "optimize for performance"
-    """
-    cli_obj = ctx.obj['cli']
+    port = port or config.get("gateway_port", 18789)
+    host = host or config.get("gateway_host", "127.0.0.1")
     
-    # Read the code file
-    with open(filepath, 'r') as f:
-        code_content = f.read()
+    # Check if already running
+    state = load_state()
+    if state.get("gateway_pid"):
+        if is_process_running(state["gateway_pid"]):
+            click.echo(f"Gateway already running on {host}:{port} (PID: {state['gateway_pid']})")
+            return
+        else:
+            click.echo("Cleaning up stale state file...")
+            state.pop("gateway_pid", None)
+            save_state(state)
     
-    prompt = f"Please refactor this code with request: {request}\n\n```\n{code_content}\n```"
-    click.echo(f"\nYou: Refactor {filepath} - {request}\n")
+    click.echo("🚀 Starting AI Influencer Gateway")
+    click.echo(f"   Agent: {config.get('name')}")
+    click.echo(f"   Server: {host}:{port}")
+    click.echo(f"   Model: {config.get('model_provider', {}).get('openai', {}).get('model', 'gpt-4')}")
+    click.echo()
     
-    asyncio.run(cli_obj.send_message(prompt, message_type="code_refactor"))
-
-
-@cli.command()
-@click.pass_context
-def chat(ctx):
-    """Start an interactive chat session with your companion.
-    
-    Type 'exit' or 'quit' to end the session.
-    """
-    cli_obj = ctx.obj['cli']
-    
-    click.echo("\n🤖 Intimate Companion - Interactive Chat")
-    click.echo("Type 'exit' or 'quit' to end the session\n")
-    
-    while True:
-        try:
-            user_input = click.prompt("You")
-            
-            if user_input.lower() in ['exit', 'quit']:
-                click.echo("Goodbye!")
-                break
-            
-            asyncio.run(cli_obj.send_message(user_input))
+    if daemon:
+        # Run in background
+        import subprocess
+        log_file = STATE_DIR / "gateway.log"
         
+        cmd = [sys.executable, "-m", "src.gateway.server", "--port", str(port), "--host", host]
+        
+        with open(log_file, 'w') as f:
+            process = subprocess.Popen(cmd, stdout=f, stderr=f, start_new_session=True)
+        
+        time.sleep(1)  # Give it time to start
+        
+        if is_process_running(process.pid):
+            click.echo(f"✅ Gateway started in background (PID: {process.pid})")
+            click.echo(f"   Logs: {log_file}")
+            save_state({"gateway_pid": process.pid, "port": port, "host": host})
+        else:
+            click.echo("❌ Failed to start gateway", err=True)
+            click.echo(f"   Check logs: {log_file}", err=True)
+    else:
+        # Run in foreground
+        from src.gateway.server import run_gateway
+        try:
+            run_gateway(port=port, host=host)
         except KeyboardInterrupt:
-            click.echo("\nGoodbye!")
-            break
-        except Exception as e:
-            click.echo(f"Error: {str(e)}", err=True)
+            click.echo("\n👋 Gateway stopped")
 
 
-@cli.command()
-@click.option('--message', default='how can you help me?', help='Message to send')
-@click.pass_context
-def ask(ctx, message):
-    """Ask the companion a question.
+@gateway.command()
+def stop():
+    """Stop the gateway server."""
+    state = load_state()
+    pid = state.get("gateway_pid")
     
-    Example:
-        companion ask --message "what's the best way to structure a Python project?"
-    """
-    cli_obj = ctx.obj['cli']
+    if not pid:
+        click.echo("Gateway is not running")
+        return
     
-    click.echo(f"\nYou: {message}\n")
-    asyncio.run(cli_obj.send_message(message))
-
-
-@cli.command()
-@click.option('--server', default='ws://localhost:18789', help='Server URL to check')
-def health(server):
-    """Check if the companion server is running.
-    
-    Example:
-        companion health --server ws://localhost:8000
-    """
-    import httpx
-    
-    http_server = server.replace('ws://', 'http://').replace('wss://', 'https://')
+    if not is_process_running(pid):
+        click.echo("Gateway process not found (stale state file)")
+        state.pop("gateway_pid", None)
+        save_state(state)
+        return
     
     try:
-        response = httpx.get(f"{http_server}/health", timeout=5.0)
-        if response.status_code == 200:
-            click.echo(f"✓ Companion server is running at {server}")
-            click.echo(f"  Status: {response.json()}")
-        else:
-            click.echo(f"✗ Server returned status {response.status_code}", err=True)
+        os.kill(pid, signal.SIGTERM)
+        click.echo(f"✅ Gateway stopped (PID: {pid})")
+        state.pop("gateway_pid", None)
+        save_state(state)
     except Exception as e:
-        click.echo(f"✗ Could not reach server at {server}", err=True)
-        click.echo(f"  Error: {str(e)}", err=True)
+        click.echo(f"❌ Failed to stop gateway: {e}", err=True)
+
+
+@gateway.command()
+def restart():
+    """Restart the gateway server."""
+    click.echo("Restarting gateway...")
+    cli.invoke(stop.get_command(click.Context(cli)))
+    time.sleep(1)
+    cli.invoke(start.get_command(click.Context(cli)))
+
+
+@gateway.command()
+def status():
+    """Check gateway status."""
+    state = load_state()
+    config = ConfigManager.load_config()
+    
+    pid = state.get("gateway_pid")
+    port = state.get("port", config.get("gateway_port", 18789))
+    host = state.get("host", config.get("gateway_host", "127.0.0.1"))
+    
+    if pid and is_process_running(pid):
+        click.echo(f"✅ Gateway is running")
+        click.echo(f"   PID: {pid}")
+        click.echo(f"   Host: {host}")
+        click.echo(f"   Port: {port}")
+        
+        # Try to get health
+        try:
+            response = get(f"http://{host}:{port}/health", timeout=2.0)
+            if response.status_code == 200:
+                data = response.json()
+                click.echo(f"   Status: {data.get('status')}")
+                click.echo(f"   Agent: {data.get('name')}")
+                click.echo(f"   Sessions: {data.get('active_sessions')}")
+        except:
+            pass
+    else:
+        click.echo("❌ Gateway is not running")
+        if pid:
+            click.echo("   (stale state file detected)")
 
 
 @cli.command()
-def version():
-    """Show version information."""
-    click.echo("Intimate Companion CLI v1.0.0")
-    click.echo("Your personal AI engineering assistant")
+@click.argument('message', required=False)
+def chat(message: Optional[str]):
+    """Chat with the AI influencer agent."""
+    config = ConfigManager.load_config()
+    host = config.get("gateway_host", "127.0.0.1")
+    port = config.get("gateway_port", 18789)
+    session_id = str(uuid.uuid4())
+    
+    async def send_message(msg: str):
+        uri = f"ws://{host}:{port}/ws/{session_id}"
+        try:
+            async with websockets.connect(uri) as websocket:
+                greeting = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                greeting_data = json.loads(greeting)
+                click.echo(f"\n{greeting_data['role']}: {greeting_data['content']}\n")
+                
+                user_msg = {
+                    "role": "user",
+                    "content": msg,
+                    "type": "text",
+                    "metadata": None
+                }
+                await websocket.send(json.dumps(user_msg))
+                
+                while True:
+                    try:
+                        response = await asyncio.wait_for(websocket.recv(), timeout=60.0)
+                        response_data = json.loads(response)
+                        if response_data.get("type") != "ping":
+                            click.echo(f"{response_data['role']}: {response_data['content']}\n")
+                    except asyncio.TimeoutError:
+                        break
+        except Exception as e:
+            click.echo(f"Error: Could not connect to gateway", err=True)
+            click.echo(f"Details: {str(e)}", err=True)
+            click.echo(f"Start the gateway: gfgpt gateway start", err=True)
+            sys.exit(1)
+    
+    async def interactive_chat():
+        uri = f"ws://{host}:{port}/ws/{session_id}"
+        try:
+            async with websockets.connect(uri) as websocket:
+                greeting = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                greeting_data = json.loads(greeting)
+                click.echo(f"\n{greeting_data['role']}: {greeting_data['content']}\n")
+                
+                while True:
+                    try:
+                        user_input = input("You: ").strip()
+                        if not user_input:
+                            continue
+                        if user_input.lower() in ['exit', 'quit', 'bye']:
+                            click.echo("Goodbye!")
+                            break
+                        
+                        msg = {
+                            "role": "user",
+                            "content": user_input,
+                            "type": "text",
+                            "metadata": None
+                        }
+                        await websocket.send(json.dumps(msg))
+                        
+                        try:
+                            response = await asyncio.wait_for(websocket.recv(), timeout=60.0)
+                            response_data = json.loads(response)
+                            if response_data.get("type") != "ping":
+                                click.echo(f"{response_data['role']}: {response_data['content']}\n")
+                        except asyncio.TimeoutError:
+                            click.echo("Response timeout\n")
+                    except KeyboardInterrupt:
+                        click.echo("\nGoodbye!")
+                        break
+        except Exception as e:
+            click.echo(f"Error: Could not connect to gateway", err=True)
+            click.echo(f"Details: {str(e)}", err=True)
+            sys.exit(1)
+    
+    if message:
+        asyncio.run(send_message(message))
+    else:
+        click.echo("\n💁 AI Influencer Agent")
+        click.echo("Type 'exit' or 'quit' to end\n")
+        asyncio.run(interactive_chat())
+
+
+@cli.command()
+def health():
+    """Check gateway health."""
+    config = ConfigManager.load_config()
+    host = config.get("gateway_host", "127.0.0.1")
+    port = config.get("gateway_port", 18789)
+    
+    try:
+        response = get(f"http://{host}:{port}/health", timeout=2.0)
+        if response.status_code == 200:
+            data = response.json()
+            click.echo("✅ Gateway is running")
+            click.echo(f"   Agent: {data.get('name')}")
+            click.echo(f"   Status: {data.get('status')}")
+            click.echo(f"   Active sessions: {data.get('active_sessions')}")
+        else:
+            click.echo(f"❌ Gateway error: {response.status_code}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Gateway is not running", err=True)
+        click.echo(f"Start it: gfgpt gateway start", err=True)
+
+
+@cli.command()
+def setup():
+    """Run initial setup."""
+    click.echo("\n🤖 AI Influencer Agent Setup\n")
+    
+    config = ConfigManager.load_config()
+    
+    name = click.prompt("Agent name", default=config.get("name", "Luna"))
+    
+    identity = click.prompt(
+        "Personality identity",
+        default=config.get("identity", "A creative AI influencer")
+    )
+    
+    behavior = click.prompt(
+        "Behavior description",
+        default=config.get("behavior", "Be engaging, creative, and social media savvy")
+    )
+    
+    api_key = click.prompt(
+        "OpenAI API Key",
+        default=config.get("model_provider", {}).get("openai", {}).get("api_key", ""),
+        hide_input=True
+    )
+    
+    config.update({
+        "name": name,
+        "identity": identity,
+        "behavior": behavior,
+        "model_provider": {
+            "openai": {
+                "api_key": api_key,
+                "model": "gpt-4"
+            }
+        }
+    })
+    
+    ConfigManager.save_config(config)
+    
+    click.echo("\n✅ Configuration saved")
+    click.echo("\nNext steps:")
+    click.echo("  gfgpt gateway start    # Start the gateway")
+    click.echo("  gfgpt chat             # Start chatting")
 
 
 if __name__ == '__main__':
-    cli(obj={})
+    cli()
