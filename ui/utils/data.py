@@ -63,8 +63,11 @@ def index_youtube_video(youtube_url: str):
         print("error", data)
 
 
+# Personalities are now stored as templates under the agent example. We
+# look relative to this file so both the UI and the example scripts can
+# access them regardless of where the repo is installed.
 COMPANION_DIR = (
-    Path(__file__) / ".." / ".." / ".." / "src" / "personalities"
+    Path(__file__) / ".." / ".." / ".." / "agent" / "templates" / "personalities"
 ).resolve()
 
 
