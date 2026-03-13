@@ -1,6 +1,7 @@
 """WebSocket gateway server for AI Influencer Agent."""
 
 import asyncio
+import argparse
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from src.agent.agent import Agent, Config
+from src.agent.loop import AgentRunLoop
 from src.config import ConfigManager, ConfigWatcher
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,15 @@ def create_app(agent: Agent, config: dict) -> FastAPI:
     )
 
     manager = ConnectionManager()
+    run_loop = AgentRunLoop(get_agent=get_agent, workers=config.get("agent_worker_threads", 1))
+
+    @app.on_event("startup")
+    async def startup_event():
+        await run_loop.start()
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        await run_loop.stop()
 
     @app.get("/health")
     async def health():
@@ -172,12 +183,11 @@ def create_app(agent: Agent, config: dict) -> FastAPI:
 
                     logger.info(f"Message from {session_id}: {message.get('content', '')[:100]}")
 
-                    # Get response from agent (always gets current agent)
-                    current_agent = get_agent()
-                    if current_agent:
-                        response_text = current_agent.respond(message.get("content", ""))
-                    else:
-                        response_text = "Error: Agent not initialized"
+                    # Dispatch agent invocation via threaded run loop.
+                    response_text = await run_loop.submit(
+                        session_id=session_id,
+                        content=message.get("content", ""),
+                    )
 
                     # Send response
                     await manager.send(session_id, {
@@ -267,3 +277,16 @@ def run_gateway(port: int = 18789, host: str = "127.0.0.1"):
     except KeyboardInterrupt:
         logger.info("Gateway shutting down...")
         watcher.stop()
+
+
+def main():
+    """CLI entrypoint for running the gateway module directly."""
+    parser = argparse.ArgumentParser(description="Run GirlfriendGPT gateway")
+    parser.add_argument("--port", type=int, default=18789, help="Gateway port")
+    parser.add_argument("--host", default="127.0.0.1", help="Gateway host")
+    args = parser.parse_args()
+    run_gateway(port=args.port, host=args.host)
+
+
+if __name__ == "__main__":
+    main()

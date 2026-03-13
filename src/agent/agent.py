@@ -132,8 +132,36 @@ Behavior: {behavior}
         
         return system_prompt
 
+    def _refresh_runtime_config(self):
+        """Refresh mutable runtime config from disk before each invocation."""
+        try:
+            from config import ConfigManager
+
+            latest = ConfigManager.load_config()
+            openai_cfg = latest.get("model_provider", {}).get("openai", {})
+
+            latest_model = openai_cfg.get("model", self.config.model)
+            self.config.model = latest_model
+            self.config.name = latest.get("name", self.config.name)
+            self.config.byline = latest.get("byline", self.config.byline)
+            self.config.identity = latest.get("identity", self.config.identity)
+            self.config.behavior = latest.get("behavior", self.config.behavior)
+
+            latest_key = openai_cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+            if latest_key:
+                os.environ["OPENAI_API_KEY"] = latest_key
+
+            # Reinitialize client if needed and rebuild prompt from latest settings.
+            self.client = OpenAI(api_key=latest_key) if OpenAI and latest_key else None
+            self.system_prompt = self._build_system_prompt()
+        except Exception:
+            # Keep serving with in-memory settings if config refresh fails.
+            pass
+
     def respond(self, user_message: str) -> str:
         """Generate a response from the LLM."""
+        self._refresh_runtime_config()
+
         if not self.client:
             return "Error: OpenAI API key not configured"
 

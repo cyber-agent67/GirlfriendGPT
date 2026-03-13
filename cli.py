@@ -96,7 +96,7 @@ def start(port: Optional[int], host: Optional[str], daemon: bool):
         import subprocess
         log_file = STATE_DIR / "gateway.log"
         
-        cmd = [sys.executable, "-m", "src.gateway.server", "--port", str(port), "--host", host]
+        cmd = [sys.executable, "-m", "src.gateway.gateway", "--port", str(port), "--host", host]
         
         with open(log_file, 'w') as f:
             process = subprocess.Popen(cmd, stdout=f, stderr=f, start_new_session=True)
@@ -112,7 +112,7 @@ def start(port: Optional[int], host: Optional[str], daemon: bool):
             click.echo(f"   Check logs: {log_file}", err=True)
     else:
         # Run in foreground
-        from src.gateway.server import run_gateway
+        from src.gateway.gateway import run_gateway
         try:
             run_gateway(port=port, host=host)
         except KeyboardInterrupt:
